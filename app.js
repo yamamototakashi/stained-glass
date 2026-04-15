@@ -292,7 +292,10 @@ function toggleFavorite() {
 function refreshFavButtonState() {
   const list = loadFavorites();
   const id = currentFavId();
-  btnFav.setAttribute('aria-pressed', String(list.some((f) => f.id === id)));
+  const active = list.some((f) => f.id === id);
+  btnFav.setAttribute('aria-pressed', String(active));
+  const heart = btnFav.querySelector('.heart');
+  if (heart) heart.textContent = active ? '♥' : '♡';
 }
 function renderGallery() {
   const list = loadFavorites();

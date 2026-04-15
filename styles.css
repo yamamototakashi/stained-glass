@@ -215,9 +215,7 @@ body {
 }
 .btn.primary .ic { color: #ffe5b0; text-shadow: 0 0 10px rgba(255,200,140,0.6); }
 
-#favBtn[aria-pressed="true"] .heart { color: #ff7096; text-shadow: 0 0 8px rgba(255,120,160,0.7); }
-#favBtn[aria-pressed="true"] .heart::before { content: "♥"; }
-#favBtn[aria-pressed="true"] .heart { content: "♥"; }
+#favBtn[aria-pressed="true"] .heart { color: #ff7096; text-shadow: 0 0 10px rgba(255,120,160,0.7); }
 
 /* compress labels on very small screens */
 @media (max-width: 420px) {
