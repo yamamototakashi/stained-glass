@@ -334,3 +334,302 @@ export function composeFromSeed(seed, opts = {}) {
     width: W, height: H, cells, lightSpots, backlight, params,
   };
 }
+
+// ===================================================================
+// Part 2 — Multi-pass luminous renderer
+// ===================================================================
+
+export function renderComposition(ctx, comp, renderOpts = {}) {
+  const { width: W, height: H } = comp;
+  const p = comp.params;
+  const leadPx = Math.max(0.6, (p.lead / 100) * 4.6 + 0.9);
+  const glow = p.glow / 100;
+  const distortion = p.distortion / 100;
+  const transparency = p.transparency / 100;
+  const shimmer = renderOpts.shimmerPhase || 0;
+
+  // Let caller render into any-sized canvas (export re-render).
+  const targetW = ctx.canvas.width, targetH = ctx.canvas.height;
+  const sx = targetW / W, sy = targetH / H;
+
+  ctx.save();
+  ctx.setTransform(sx, 0, 0, sy, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+
+  // 1. base ink
+  ctx.fillStyle = '#05060a';
+  ctx.fillRect(0, 0, W, H);
+
+  // 2. backlight
+  drawBacklight(ctx, comp, W, H);
+
+  // 3. soft diagonal light beams
+  drawLightBeams(ctx, comp, W, H, glow);
+
+  // 4. translucent glass cells
+  for (const c of comp.cells) drawCell(ctx, c, transparency, distortion, shimmer);
+
+  // 5. caustic hotspot bursts (sunlight passing through)
+  drawLightSpots(ctx, comp, W, H, glow);
+
+  // 6. global soft bloom
+  applyBloom(ctx, W, H, glow, sx, sy);
+
+  // 7. lead came: shadow → dark body → top-edge highlight
+  drawLead(ctx, comp, leadPx);
+
+  // 8. faint glass grain overlay
+  applyGrain(ctx, comp, W, H);
+
+  // 9. final vignette + color polish
+  applyVignette(ctx, W, H);
+
+  ctx.restore();
+}
+
+// ---------- Passes ----------
+
+function drawBacklight(ctx, comp, W, H) {
+  const bl = comp.backlight;
+  const g = ctx.createRadialGradient(bl.x, bl.y, 10, bl.x, bl.y, bl.r);
+  const c = bl.tint;
+  g.addColorStop(0, hsl(c.h, Math.max(10, c.s * 0.55), Math.min(98, c.l + 28), 0.88));
+  g.addColorStop(0.4, hsl(c.h, c.s * 0.5, c.l + 8, 0.34));
+  g.addColorStop(1, 'rgba(4,5,9,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  const floor = ctx.createLinearGradient(0, H * 0.65, 0, H);
+  floor.addColorStop(0, 'rgba(0,0,0,0)');
+  floor.addColorStop(1, 'rgba(18,10,4,0.5)');
+  ctx.fillStyle = floor;
+  ctx.fillRect(0, 0, W, H);
+}
+
+function drawLightBeams(ctx, comp, W, H, glow) {
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  const bl = comp.backlight;
+  for (let i = 0; i < 2; i++) {
+    ctx.save();
+    ctx.translate(bl.x, bl.y);
+    ctx.rotate(-0.45 + i * 0.09);
+    const width = Math.max(W, H) * (0.16 + i * 0.09);
+    const length = Math.max(W, H) * 1.8;
+    const g = ctx.createLinearGradient(-width, 0, width, 0);
+    g.addColorStop(0, 'rgba(255,240,210,0)');
+    g.addColorStop(0.5, `rgba(255,240,210,${0.04 + glow * 0.07})`);
+    g.addColorStop(1, 'rgba(255,240,210,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(-width, -length / 2, width * 2, length);
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+function tracePath(ctx, poly) {
+  ctx.beginPath();
+  ctx.moveTo(poly[0].x, poly[0].y);
+  for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+  ctx.closePath();
+}
+
+function drawCell(ctx, cell, transparency, distortion, shimmer) {
+  const poly = cell.polygon;
+  const { centroid: { x: cx, y: cy }, bbox } = cell;
+  const bd = bbox.diag;
+  const c1 = cell.color1, c2 = cell.color2;
+  const bw = bbox.maxX - bbox.minX, bh = bbox.maxY - bbox.minY;
+
+  ctx.save();
+  tracePath(ctx, poly);
+  ctx.clip();
+
+  // base translucent gradient (two sibling hues)
+  const ga = cell.gradientAngle;
+  const gx1 = cx + Math.cos(ga) * bd * 0.5, gy1 = cy + Math.sin(ga) * bd * 0.5;
+  const gx0 = cx - Math.cos(ga) * bd * 0.5, gy0 = cy - Math.sin(ga) * bd * 0.5;
+  const g = ctx.createLinearGradient(gx0, gy0, gx1, gy1);
+  const baseA = Math.min(0.96, Math.max(0.2, transparency * cell.thickness));
+  g.addColorStop(0, hsl(c1.h, c1.s, Math.max(4, c1.l - 6), Math.min(0.97, baseA + 0.08)));
+  g.addColorStop(0.5, hsl(c1.h, c1.s, c1.l, baseA));
+  g.addColorStop(1, hsl(c2.h, c2.s, c2.l + 4, Math.max(0.1, baseA - 0.05)));
+  ctx.fillStyle = g;
+  ctx.fillRect(bbox.minX - 2, bbox.minY - 2, bw + 4, bh + 4);
+
+  // radial depth darkening at edges
+  const rg = ctx.createRadialGradient(cx, cy, 0, cx, cy, bd * 0.72);
+  rg.addColorStop(0, 'rgba(0,0,0,0)');
+  rg.addColorStop(0.7, 'rgba(0,0,0,0)');
+  rg.addColorStop(1, 'rgba(0,0,0,0.3)');
+  ctx.fillStyle = rg;
+  ctx.fillRect(bbox.minX - 2, bbox.minY - 2, bw + 4, bh + 4);
+
+  // internal streaks (glass ribbon pattern)
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(cell.streakAngle);
+  ctx.lineCap = 'round';
+  for (const s of cell.streaks) {
+    ctx.beginPath();
+    const L = bd + 60;
+    const y0 = s.offset;
+    ctx.moveTo(-L / 2, y0);
+    const step = 9;
+    for (let x = -L / 2; x <= L / 2; x += step) {
+      const yy = y0 + Math.sin(x * s.freq + s.phase + shimmer * 0.4) * s.amp;
+      ctx.lineTo(x, yy);
+    }
+    ctx.strokeStyle = hsl(s.tint.h, s.tint.s, s.tint.l, s.alpha);
+    ctx.lineWidth = s.width;
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // hotspot: bright refracted center with bloom-like falloff
+  if (cell.isHotspot) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    const hr = ctx.createRadialGradient(cx, cy, 0, cx, cy, bd * 0.65);
+    const ht = { h: c1.h, s: Math.max(18, c1.s - 12), l: Math.min(98, c1.l + 44) };
+    hr.addColorStop(0, hsl(ht.h, ht.s, ht.l, 0.75 * cell.hotspotIntensity));
+    hr.addColorStop(0.45, hsl(ht.h, ht.s, ht.l, 0.2 * cell.hotspotIntensity));
+    hr.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = hr;
+    ctx.fillRect(bbox.minX, bbox.minY, bw, bh);
+    ctx.restore();
+  }
+
+  // inner edge brightness ring (subtle refraction rim)
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  tracePath(ctx, poly);
+  const et = cell.edgeTint;
+  ctx.strokeStyle = hsl(et.h, et.s, Math.min(92, et.l + 4), 0.32);
+  ctx.lineWidth = 1.3;
+  ctx.stroke();
+  // a slightly brighter thin line near one random edge segment for a refraction flash
+  const seg = (cell.streaks.length + 1) % poly.length;
+  const a = poly[seg], b = poly[(seg + 1) % poly.length];
+  ctx.beginPath();
+  ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+  ctx.strokeStyle = hsl(et.h, Math.max(10, et.s - 30), 96, 0.28);
+  ctx.lineWidth = 0.8;
+  ctx.stroke();
+  ctx.restore();
+
+  // gloss highlight near upper region
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  const gx = cx + cell.glossOffset.x;
+  const gy = cy + cell.glossOffset.y;
+  const gr = ctx.createRadialGradient(gx, gy, 0, gx, gy, bd * 0.55);
+  const gt = cell.glossTint;
+  gr.addColorStop(0, hsl(gt.h, gt.s, gt.l, 0.24));
+  gr.addColorStop(0.4, hsl(gt.h, gt.s, gt.l, 0.06));
+  gr.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = gr;
+  ctx.fillRect(bbox.minX, bbox.minY, bw, bh);
+  ctx.restore();
+
+  ctx.restore(); // clip off
+}
+
+function drawLightSpots(ctx, comp, W, H, glow) {
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  for (const s of comp.lightSpots) {
+    const g = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, s.r);
+    const t = s.tint;
+    g.addColorStop(0, hsl(t.h, Math.max(18, t.s - 22), Math.min(96, t.l + 30), s.alpha * (0.5 + glow * 0.7)));
+    g.addColorStop(0.4, hsl(t.h, t.s, t.l + 10, s.alpha * 0.35));
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+  ctx.restore();
+}
+
+function applyBloom(ctx, W, H, glow, sx, sy) {
+  if (glow <= 0.02) return;
+  const cw = ctx.canvas.width, ch = ctx.canvas.height;
+  const scale = 0.25;
+  const ow = Math.max(2, Math.floor(cw * scale));
+  const oh = Math.max(2, Math.floor(ch * scale));
+  const off = document.createElement('canvas');
+  off.width = ow; off.height = oh;
+  const octx = off.getContext('2d');
+  octx.filter = `blur(${Math.max(2, Math.floor(ow * 0.02))}px) saturate(1.25) brightness(1.12)`;
+  octx.drawImage(ctx.canvas, 0, 0, cw, ch, 0, 0, ow, oh);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'screen';
+  ctx.globalAlpha = 0.22 + glow * 0.46;
+  ctx.drawImage(off, 0, 0, cw, ch);
+  ctx.restore();
+  ctx.setTransform(sx, 0, 0, sy, 0, 0); // restore comp transform for caller
+}
+
+function drawLead(ctx, comp, leadPx) {
+  ctx.save();
+  // soft outer shadow (richer under bright glow)
+  ctx.shadowColor = 'rgba(0,0,0,0.55)';
+  ctx.shadowBlur = leadPx * 3.2;
+  ctx.shadowOffsetY = leadPx * 0.35;
+  ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.lineWidth = leadPx * 1.55;
+  for (const c of comp.cells) { tracePath(ctx, c.polygon); ctx.stroke(); }
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+
+  // main dark lead body
+  ctx.strokeStyle = '#0a0b12';
+  ctx.lineWidth = leadPx;
+  for (const c of comp.cells) { tracePath(ctx, c.polygon); ctx.stroke(); }
+
+  // subtle top-edge gloss offset up
+  ctx.globalCompositeOperation = 'screen';
+  ctx.strokeStyle = 'rgba(228,218,198,0.09)';
+  ctx.lineWidth = Math.max(0.4, leadPx * 0.38);
+  ctx.save();
+  ctx.translate(0, -Math.max(0.3, leadPx * 0.22));
+  for (const c of comp.cells) { tracePath(ctx, c.polygon); ctx.stroke(); }
+  ctx.restore();
+  ctx.restore();
+}
+
+function applyGrain(ctx, comp, W, H) {
+  if (!comp._grain) comp._grain = makeGrain((comp.seed ^ 0x42424242) >>> 0);
+  ctx.save();
+  ctx.globalCompositeOperation = 'overlay';
+  ctx.globalAlpha = 0.07;
+  const pat = ctx.createPattern(comp._grain, 'repeat');
+  ctx.fillStyle = pat;
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+}
+function makeGrain(seed) {
+  const s = 256;
+  const c = document.createElement('canvas');
+  c.width = c.height = s;
+  const cc = c.getContext('2d');
+  const img = cc.createImageData(s, s);
+  const rng = mulberry32(seed);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const v = 128 + ((rng() - 0.5) * 90) | 0;
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+    img.data[i + 3] = 255;
+  }
+  cc.putImageData(img, 0, 0);
+  return c;
+}
+
+function applyVignette(ctx, W, H) {
+  const g = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.78);
+  g.addColorStop(0, 'rgba(0,0,0,0)');
+  g.addColorStop(1, 'rgba(0,0,0,0.6)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+}
